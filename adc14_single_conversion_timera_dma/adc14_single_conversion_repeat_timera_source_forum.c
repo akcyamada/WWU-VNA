@@ -230,8 +230,8 @@ int main(void)
     Interrupt_enableMaster();
 
     /* Going to sleep */
-    PCM_gotoLPM0();
-    __no_operation();
+ //   PCM_gotoLPM0();
+  //  __no_operation();
 }
 
 /* Completion interrupt for ADC14 MEM0 */
