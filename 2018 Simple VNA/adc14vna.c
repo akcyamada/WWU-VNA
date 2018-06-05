@@ -107,8 +107,8 @@ int adc14_main(void)
     // Register interrupt (sets up IRQ vectors) using TI-RTOS which Energia uses.
 //    Hwi_Params params;
 //    Hwi_Params_init(&params);
-//    Hwi_create(DMA_INT1, DMA_INT1_IRQHandler, &params, 0);
-//    Hwi_setPriority(DMA_INT1, 60);
+//    Hwi_create(INT_DMA_INT1, DMA_INT1_IRQHandler, &params, 0);
+//    Hwi_setPriority(INT_DMA_INT1, 60);
 
 //    Hwi_Handle myHwi;
 //    Error_Block eb;
@@ -120,12 +120,12 @@ int adc14_main(void)
 //        return 1;
 //    }
 
-    Hwi_Params params;
-    Hwi_Params_init(&params);
-    params.priority = 0;
-    Hwi_create(INT_DMA_INT1, DMA_INT1_IRQHandler, &params, NULL);
+//    Hwi_Params params;
+//    Hwi_Params_init(&params);
+//    params.priority = 0;
+//    Hwi_create(INT_DMA_INT1, DMA_INT1_IRQHandler, &params, NULL);
 
-
+//    MAP_Interrupt_registerInterrupt(INT_DMA_INT1, DMA_INT1_IRQHandler);
 
     // Configuring debugging pins as output for debugging...
     MAP_GPIO_setAsOutputPin(GPIO_PORT_P5, GPIO_PIN5);

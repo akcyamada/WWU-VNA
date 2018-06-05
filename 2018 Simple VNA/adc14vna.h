@@ -7,10 +7,10 @@
 
 #ifndef ADC14VNA_H_
 #define ADC14VNA_H_
-//#include <ti/sysbios/family/arm/m3/Hwi.h>
-#include <ti/sysbios/hal/Hwi.h>
-#include <xdc/runtime/Error.h>
-#include <xdc/runtime/System.h>
+#include <ti/sysbios/family/arm/m3/Hwi.h>
+//#include <ti/sysbios/hal/Hwi.h>
+//#include <xdc/runtime/Error.h>
+//#include <xdc/runtime/System.h>
 
 /* DriverLib Includes */
 #include <driverlib.h>
