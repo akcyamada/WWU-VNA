@@ -37,7 +37,10 @@ void sendSampleRate(char **values, int valueCount);
 
 void setup()
 {
-    adc14_main(); // Initialize ADC14 for multichannel conversion at 8 kHz.
+    if (adc14_main()) // Initialize ADC14 for multichannel conversion at 8 kHz.
+    {
+        Serial.println("ADC setup failed");
+    }
     si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
     // For debugging 1/4/2018
     si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
@@ -127,7 +130,7 @@ void sweepFreqMeas(char **values, int valueCount) // Might change function type 
     {
         freq[i]=fMin+i*deltaFreq;
         setOscillator(freq[i]);
-        ADC14_enableConversion();
+        startConversion();
         while(!doneADC)
         {
             /* Wait until it is done converting everything at
@@ -183,7 +186,7 @@ void voltageMeasurement(char **values, int valueCount) // Might want to return e
     }
     freq = atoi(values[1]);
     setOscillator(freq);
-    ADC14_enableConversion();
+    startConversion();
     while(!doneADC)
     {}
     {

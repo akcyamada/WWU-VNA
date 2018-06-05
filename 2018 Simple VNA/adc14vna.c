@@ -58,146 +58,165 @@
  *
  *
  * Author: Timothy Logan
- * This was modified by Rob Frohne to do multiple ADC at 8 kHz sample rate,
+ * This was modified by Rob Frohne and Jacob Priddy to do multiple ADC at x kHz sample rate,
  * and in concert with Energia.
  ******************************************************************************/
 #include "adc14vna.h"
-/* DriverLib Includes */
-#include <driverlib.h>
 
-/* Standard Includes */
-#include <stdint.h>
-#include <string.h>
-#include <stdio.h>
-#include <stdbool.h>
+/* DMA Control Table */
+#if defined(__TI_COMPILER_VERSION__)
+#pragma DATA_ALIGN(MSP_EXP432P401RLP_DMAControlTable, 1024)
+#elif defined(__IAR_SYSTEMS_ICC__)
+#pragma data_alignment=1024
+#elif defined(__GNUC__)
+__attribute__ ((aligned (1024)))
+#elif defined(__CC_ARM)
+__align(1024)
+#endif
+static DMA_ControlTable MSP_EXP432P401RLP_DMAControlTable[16];
 
-void ADC14_IRQHandler(void);
-/* Timer_A Continuous Mode Configuration Parameter */
-const Timer_A_UpModeConfig upModeConfig =
+const Timer_A_PWMConfig timerA_PWM =
 {
- TIMER_A_CLOCKSOURCE_SMCLK,           // SMCLK Clock Source
- TIMER_A_CLOCKSOURCE_DIVIDER_1,       // SMCLK/1 = 48MHz
- (SMCLK_FREQUENCY/SAMPLE_FREQUENCY),  // Number of counts
- TIMER_A_TAIE_INTERRUPT_DISABLE,      // Disable Timer ISR
- TIMER_A_CCIE_CCR0_INTERRUPT_DISABLE, // Disable CCR0
- TIMER_A_DO_CLEAR                     // Clear Counter
+    .clockSource = TIMER_A_CLOCKSOURCE_SMCLK,
+    .clockSourceDivider = TIMER_A_CLOCKSOURCE_DIVIDER_1,
+    .timerPeriod =  (SMCLK_FREQUENCY/SAMPLE_FREQUENCY),
+    .compareRegister = TIMER_A_CAPTURECOMPARE_REGISTER_1,
+    .compareOutputMode = TIMER_A_OUTPUTMODE_SET_RESET,
+    .dutyCycle = 11
 };
 
-/* Timer_A Compare Configuration Parameter */
-const Timer_A_CompareModeConfig compareConfig =
-{
- TIMER_A_CAPTURECOMPARE_REGISTER_1,          // Use CCR1
- TIMER_A_CAPTURECOMPARE_INTERRUPT_DISABLE,   // Disable CCR interrupt
- TIMER_A_OUTPUTMODE_SET_RESET,               // Toggle output bit
- (SMCLK_FREQUENCY/SAMPLE_FREQUENCY)
-};
-
-static volatile uint16_t resultsBuffer[8];
+static volatile bool doneRef = false;
+static volatile bool doneMeas = false;
 extern volatile uint16_t ref[SAMPLE_LENGTH];
 extern volatile uint16_t meas[SAMPLE_LENGTH];
 extern volatile bool doneADC = false;
+
+void startConversion(void)
+{
+    P1->OUT |= BIT0;
+    P1IFG &= ~BIT1;
+    MAP_DMA_enableChannel(7);
+    MAP_Timer_A_generatePWM(TIMER_A0_BASE, &timerA_PWM);
+    P1->OUT &= ~BIT0;
+}
 
 int adc14_main(void)
 {
     int i;
 
-    /* This stuff added by Rob to make sure we are ok at 48 MHz.  It is probably not
-     * needed, but might help.
-     */
-    /*
-     * Starting HFXT in non-bypass mode without a timeout. Before we start
-     * we have to change VCORE to 1 to support the 48MHz frequency
-     */
-    PCM_setCoreVoltageLevel(PCM_VCORE1);
-
-    /*
-     * Revision C silicon supports wait states of 1 at 48Mhz
-     */
-    FlashCtl_setWaitState(FLASH_BANK0, 1);
-    FlashCtl_setWaitState(FLASH_BANK1, 1);
-
-    /*
-     * Setting up clocks
-     * MCLK = MCLK = 48MHz
-     * SMCLK = MCLK/2 = 24Mhz
-     * ACLK = REFO = 32Khz
-     */
-    CS_setDCOFrequency(48000000);
-    CS_initClockSignal(CS_ACLK, CS_REFOCLK_SELECT, CS_CLOCK_DIVIDER_1);
-    CS_initClockSignal(CS_SMCLK, CS_DCOCLK_SELECT, CS_CLOCK_DIVIDER_2);
-    CS_initClockSignal(CS_MCLK, CS_DCOCLK_SELECT, CS_CLOCK_DIVIDER_1);
-
-    /* End: this stuff added by Rob to make sure we are ok at 48 MHz.  It is probably not
-     * needed, but might help.
-     */
-
     // Register interrupt (sets up IRQ vectors) using TI-RTOS which Energia uses.
+//    Hwi_Params params;
+//    Hwi_Params_init(&params);
+//    Hwi_create(DMA_INT1, DMA_INT1_IRQHandler, &params, 0);
+//    Hwi_setPriority(DMA_INT1, 60);
+
+//    Hwi_Handle myHwi;
+//    Error_Block eb;
+//    Error_init(&eb);
+//
+//    myHwi = Hwi_create(DMA_INT1, DMA_INT1_IRQHandler, NULL, &eb);
+//
+//    if (myHwi == NULL) {
+//        return 1;
+//    }
+
     Hwi_Params params;
     Hwi_Params_init(&params);
-    Hwi_create(INT_ADC14, ADC14_IRQHandler, &params, 0);
-    Hwi_setPriority(INT_ADC14, 60);
+    params.priority = 0;
+    Hwi_create(INT_DMA_INT1, DMA_INT1_IRQHandler, &params, NULL);
+
+
 
     // Configuring debugging pins as output for debugging...
-    GPIO_setAsOutputPin(GPIO_PORT_P5, GPIO_PIN5);
-    GPIO_setAsOutputPin(GPIO_PORT_P5, GPIO_PIN4);
-    GPIO_setAsOutputPin(GPIO_PORT_P1, GPIO_PIN0);
+    MAP_GPIO_setAsOutputPin(GPIO_PORT_P5, GPIO_PIN5);
+    MAP_GPIO_setAsOutputPin(GPIO_PORT_P5, GPIO_PIN4);
+    MAP_GPIO_setAsOutputPin(GPIO_PORT_P1, GPIO_PIN0);
+    P1OUT &= ~BIT0;
 
-    //Zero-filling buffer
-    memset(resultsBuffer, 0x00, 8);
+    /*
+     * Debug: set TA0.1 as output to see ADC trigger signal
+     */
+    MAP_GPIO_setAsPeripheralModuleFunctionOutputPin(GPIO_PORT_P2, GPIO_PIN4,GPIO_PRIMARY_MODULE_FUNCTION);
 
     // Setting reference voltage to 2.5  and enabling reference
-    REF_A_setReferenceVoltage(REF_A_VREF2_5V);
-    REF_A_enableReferenceVoltage();
+    MAP_REF_A_setReferenceVoltage(REF_A_VREF2_5V);
+    MAP_REF_A_enableReferenceVoltage();
 
     //Initializing ADC (MCLK/1/1)
-    ADC14_enableModule();
-    ADC14_initModule(ADC_CLOCKSOURCE_MCLK, ADC_PREDIVIDER_1, ADC_DIVIDER_1,
+    MAP_ADC14_enableModule();
+    MAP_ADC14_initModule(ADC_CLOCKSOURCE_MCLK, ADC_PREDIVIDER_1, ADC_DIVIDER_1,
                      0);
 
     //Configuring GPIOs for Analog In
-    GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P4,
+    MAP_GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P4,
          GPIO_PIN0, GPIO_TERTIARY_MODULE_FUNCTION);
-    GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P6,
+    MAP_GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P6,
          GPIO_PIN1, GPIO_TERTIARY_MODULE_FUNCTION);
 
     // Configuring ADC Memory (ADC_MEM0 - ADC_MEM1 (A13, A14)  with no repeat)
     // with internal 2.5v reference
-    ADC14_configureMultiSequenceMode(ADC_MEM0, ADC_MEM1, false);
-    ADC14_configureConversionMemory(ADC_MEM0,
+    MAP_ADC14_configureMultiSequenceMode(ADC_MEM0, ADC_MEM1, false);
+    MAP_ADC14_configureConversionMemory(ADC_MEM0,
                                     ADC_VREFPOS_INTBUF_VREFNEG_VSS,
                                     ADC_INPUT_A13, ADC_NONDIFFERENTIAL_INPUTS);
-    ADC14_configureConversionMemory(ADC_MEM1,
+    MAP_ADC14_configureConversionMemory(ADC_MEM1,
                                     ADC_VREFPOS_INTBUF_VREFNEG_VSS,
                                     ADC_INPUT_A14, ADC_NONDIFFERENTIAL_INPUTS);
 
     //  Enabling the interrupt when a conversion on channel 1 (end of sequence)
     //  is complete and enabling conversions
-    ADC14_enableInterrupt(ADC_INT1);
+    MAP_ADC14_enableInterrupt(ADC_INT1);
 
     // This may need to be increased if the sample capacitor doesn't charge in time.
     // This will be controlled by the reference channel, because it has higher resistance.
-    ADC14_setSampleHoldTime(ADC_PULSE_WIDTH_4, ADC_PULSE_WIDTH_4);
-
-    // Configuring Timer_A in continuous mode as setup in upModeConfig above
-    Timer_A_configureUpMode(TIMER_A0_BASE, &upModeConfig);
-
-    // Configuring Timer_A0 in CCR1 to trigger as set in compareConfig above
-    Timer_A_initCompare(TIMER_A0_BASE, &compareConfig);
+    MAP_ADC14_setSampleHoldTime(ADC_PULSE_WIDTH_4, ADC_PULSE_WIDTH_4);
 
     // Configuring the sample trigger to be sourced from Timer_A0  and setting it
     // to automatic iteration after it is triggered
-    ADC14_setSampleHoldTrigger(ADC_TRIGGER_SOURCE1, false);
+    MAP_ADC14_setSampleHoldTrigger(ADC_TRIGGER_SOURCE1, false);
 
     // Setting up the sample timer to automatically step through the sequence
     // convert.
-    ADC14_enableSampleTimer(ADC_AUTOMATIC_ITERATION);
+    MAP_ADC14_enableSampleTimer(ADC_AUTOMATIC_ITERATION);
 
-    // Enabling Interrupts
-    Interrupt_enableInterrupt(INT_ADC14);
-    Interrupt_enableMaster();
+    MAP_ADC14_enableConversion();
 
-    // Starting the Timer
-    Timer_A_startCounter(TIMER_A0_BASE, TIMER_A_UP_MODE);
+
+
+    /* Configuring DMA module */
+    MAP_DMA_enableModule();
+    MAP_DMA_setControlBase(MSP_EXP432P401RLP_DMAControlTable);
+
+    /*
+     * Setup the DMA + ADC14 interface
+     */
+    MAP_DMA_disableChannelAttribute(DMA_CH7_ADC14,
+                                 UDMA_ATTR_ALTSELECT | UDMA_ATTR_USEBURST |
+                                 UDMA_ATTR_HIGH_PRIORITY |
+                                 UDMA_ATTR_REQMASK);
+
+    /*
+     * Setting Control Indexes. In this case we will set the source of the
+     * DMA transfer to ADC14 Memory 0 and the destination to the destination
+     * data array.
+     */
+    MAP_DMA_setChannelControl(UDMA_PRI_SELECT | DMA_CH7_ADC14,
+            UDMA_SIZE_16 | UDMA_SRC_INC_NONE | UDMA_DST_INC_16 | UDMA_ARB_1);
+    MAP_DMA_setChannelTransfer(UDMA_PRI_SELECT | DMA_CH7_ADC14,
+            UDMA_MODE_PINGPONG, (void*) &ADC14->MEM[0],
+            (void*)meas, SAMPLE_LENGTH);
+
+    MAP_DMA_setChannelControl(UDMA_ALT_SELECT | DMA_CH7_ADC14,
+            UDMA_SIZE_16 | UDMA_SRC_INC_NONE | UDMA_DST_INC_16 | UDMA_ARB_1);
+    MAP_DMA_setChannelTransfer(UDMA_ALT_SELECT | DMA_CH7_ADC14,
+            UDMA_MODE_PINGPONG, (void*) &ADC14->MEM[1],
+            (void*)ref, SAMPLE_LENGTH);
+
+    /* Assigning/Enabling Interrupts */
+    MAP_DMA_assignInterrupt(DMA_INT1, 7);
+    MAP_DMA_assignChannel(DMA_CH7_ADC14);
+    MAP_DMA_clearInterruptFlag(7);
+
 
     // Initialize results arrays and done flag.
     for (i=0; i<SAMPLE_LENGTH; i++)
@@ -206,37 +225,45 @@ int adc14_main(void)
         meas[i] = 0;
     }
     doneADC = false;
+
+    /* Enabling Interrupts */
+    MAP_Interrupt_enableInterrupt(INT_DMA_INT1);
+    MAP_Interrupt_enableInterrupt(INT_ADC14);
+    MAP_Interrupt_enableMaster();
+    return 0;
 }
 
-/* This interrupt is fired whenever a conversion is completed and placed in
- * ADC_MEM1. This signals the end of conversion and the results array is
- * grabbed and placed in resultsBuffer */
-void ADC14_IRQHandler(void)
-{
-    uint64_t status;
-    static int i = 0;
-    status = ADC14_getEnabledInterruptStatus();
-    ADC14_clearInterruptFlag(status);
 
-    if(status & ADC_INT1)
+/* Completion interrupt for ADC14 MEM0 */
+/*__attribute__((ramfunc))*/  // Requires compiler TI v15.12.1.LTS
+void DMA_INT1_IRQHandler(void)
+{
+    P1->OUT |= BIT0;
+    /*
+     * Switch between primary and alternate buffers with DMA's PingPong mode
+     */
+    if (DMA_getChannelAttribute(7) & UDMA_ATTR_ALTSELECT)
     {
-        doneADC = false;
-        ADC14_getMultiSequenceResult(resultsBuffer);
-        meas[i] = resultsBuffer[0];
-        ref[i] = resultsBuffer[1];
-        GPIO_toggleOutputOnPin(GPIO_PORT_P5, GPIO_PIN5);
-        ADC14_disableConversion();
-        if (i!=SAMPLE_LENGTH)
-        {
-            i++;
-            ADC14_enableConversion();
-        }
-        else
-        {
-            i=0;
-            GPIO_toggleOutputOnPin(GPIO_PORT_P5, GPIO_PIN4);
-            doneADC = true;
-        }
+        MSP_EXP432P401RLP_DMAControlTable[7].control =
+                (MSP_EXP432P401RLP_DMAControlTable[7].control & 0xff000000 ) |
+                (((SAMPLE_LENGTH)-1)<<4) | 0x03;
+        doneMeas = true;
     }
+    else
+    {
+        MSP_EXP432P401RLP_DMAControlTable[15].control =
+                (MSP_EXP432P401RLP_DMAControlTable[15].control & 0xff000000 ) |
+                (((SAMPLE_LENGTH)-1)<<4) | 0x03;
+        doneRef = true;
+    }
+
+    if(doneRef && doneMeas)
+    {
+        MAP_Timer_A_stopTimer(TIMER_A0_BASE);
+        MAP_DMA_disableChannel(7);
+        doneADC = true;
+    }
+
+    P1->OUT &= ~BIT0;
 }
 
